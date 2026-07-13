@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+from AppKit import NSImage, NSWorkspace
 
 PROJECTS = Path.home() / ".claude" / "projects"
 OUT = Path.home() / "ClaudeSessions"
@@ -50,7 +51,7 @@ _FONT = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 46)
 _FONT_BOLD = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 22, index=1)
 _FONT_SM = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 26)
 _FONT_SM_BOLD = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 28, index=1)
-ICON_VER = "v5"  # bump to force re-render of all icons
+ICON_VER = "v6"  # bump to force re-render of all icons
 
 INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -69,6 +70,17 @@ INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 RUN_SCRIPT = """#!/bin/bash
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 exec open -a Terminal "$DIR/Resources/session.command"
+"""
+
+RESUME_ACTIVE_BODY = """#!/bin/bash
+# Reopen every session recorded as active (written each minute by the refresh daemon).
+STATE="$HOME/.claude/active-sessions-state.txt"
+[ -s "$STATE" ] || { echo "no active sessions recorded"; sleep 2; exit 0; }
+while IFS='|' read -r sid cwd; do
+  [ -d "$cwd" ] || continue
+  pgrep -f "claude .*--resume $sid" >/dev/null && continue  # already open
+  osascript -e "tell application \\"Terminal\\" to do script \\"cd '$cwd' && claude --dangerously-skip-permissions --resume $sid\\"" >/dev/null
+done < "$STATE"
 """
 
 try:
@@ -236,6 +248,89 @@ def make_detail_preview(proj, msgs, dot, dest):
     img.save(dest)
 
 
+_PALETTE = [(217, 119, 87), (95, 158, 217), (120, 190, 120), (200, 140, 210),
+            (222, 184, 78), (110, 200, 190), (230, 120, 140), (150, 150, 220)]
+
+
+def accent_for(name):
+    return _PALETTE[int(hashlib.md5(name.encode()).hexdigest(), 16) % len(_PALETTE)]
+
+
+_FONT_TITLE = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 58, index=1)
+_FONT_SUB = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 34)
+
+
+def make_folder_icon(name, total, gen, wait, folder_path, unit="session"):
+    """Custom icon for a project folder: name, session count, status badges."""
+    S = 512
+    ac = accent_for(name)
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([10, 96, S - 10, S - 20], radius=44, fill=(28, 30, 36, 255),
+                        outline=(*ac, 255), width=5)
+    d.rounded_rectangle([10, 40, 240, 140], radius=30, fill=ac)  # folder tab
+    d.rectangle([10, 96, 240, 120], fill=ac)
+    # project name, wrapped to two lines
+    display = re.sub(r"^\d+\s+", "", name)
+    words, lines, cur = display.split(), [], ""
+    for w in words:
+        if len(cur) + len(w) + 1 <= 12:
+            cur = (cur + " " + w).strip()
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    y = 180
+    for line in lines[:2]:
+        tw = d.textlength(line, font=_FONT_TITLE)
+        d.text(((S - tw) / 2, y), line, font=_FONT_TITLE, fill=(240, 240, 237))
+        y += 74
+    sub = f"{total} {unit}{'s' if total != 1 else ''}"
+    tw = d.textlength(sub, font=_FONT_SUB)
+    d.text(((S - tw) / 2, y + 14), sub, font=_FONT_SUB, fill=(160, 166, 176))
+    bx = S / 2 - (46 * ((gen > 0) + (wait > 0))) / 2
+    for count, col in [(gen, (217, 119, 87)), (wait, (40, 200, 64))]:
+        if count:
+            d.ellipse([bx, y + 78, bx + 34, y + 112], fill=col)
+            d.text((bx + 40, y + 76), str(count), font=_FONT_SUB, fill=col)
+            bx += 92
+    img.save(ICON_TMP)
+    ns = NSImage.alloc().initWithContentsOfFile_(str(ICON_TMP))
+    NSWorkspace.sharedWorkspace().setIcon_forFile_options_(ns, str(folder_path), 0)
+
+
+def make_glyph_icon(kind, accent, dest):
+    """Icon for an action launcher: 'plus' or 'play' glyph on a dark tile."""
+    S = 512
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([10, 10, S - 10, S - 10], radius=64, fill=(28, 30, 36, 255),
+                        outline=(*accent, 255), width=6)
+    c, r, t = S / 2, 120, 26
+    if kind == "plus":
+        d.rounded_rectangle([c - r, c - t, c + r, c + t], radius=t, fill=accent)
+        d.rounded_rectangle([c - t, c - r, c + t, c + r], radius=t, fill=accent)
+    else:  # play triangle
+        d.polygon([(c - 80, c - 110), (c - 80, c + 110), (c + 120, c)], fill=accent)
+    img.save(ICON_TMP)
+    subprocess.run(["sips", "-s", "format", "icns", str(ICON_TMP), "--out", str(dest)],
+                   capture_output=True)
+
+
+def make_action(app, title, kind, accent, script_body, wanted, out_root):
+    """Write a small action launcher bundle (clickable in the Dock grid)."""
+    res = app / "Contents" / "Resources"
+    macos = app / "Contents" / "MacOS"
+    res.mkdir(parents=True, exist_ok=True)
+    macos.mkdir(parents=True, exist_ok=True)
+    write_if_changed(app / "Contents" / "Info.plist", INFO_PLIST.format(name=title))
+    write_if_changed(macos / "run", RUN_SCRIPT, mode=0o755)
+    write_if_changed(res / "session.command", script_body, mode=0o755)
+    if not (res / "icon.icns").exists():
+        make_glyph_icon(kind, accent, res / "icon.icns")
+    wanted.add(str(app.relative_to(out_root)))
+
+
 def write_if_changed(path, content, mode=None):
     if not path.exists() or path.read_text() != content:
         path.write_text(content)
@@ -271,6 +366,10 @@ def main():
     wanted = set()
 
     counters = {}
+    folder_stats = {}
+    gidx = 0
+    (OUT / "1 All Sessions").mkdir(exist_ok=True)
+    (OUT / "2 Projects").mkdir(exist_ok=True)
     for mtime, f, cwd, first in picked:
         sid = f.stem
         proj = os.path.basename(cwd)
@@ -287,6 +386,12 @@ def main():
             dot = "⚡ " if now - mtime < GENERATING_SECS else "🟢 "
         else:
             dot = ""
+        stx = folder_stats.setdefault(folder, {"total": 0, "gen": 0, "wait": 0, "cwd": cwd})
+        stx["total"] += 1
+        if dot == "⚡ ":
+            stx["gen"] += 1
+        elif dot == "🟢 ":
+            stx["wait"] += 1
         snippet = re.sub(r"[/:\n\r]", " ", first)[:45].strip()
         base = f"{i:02d} {dot}{proj} — {snippet}" if snippet else f"{i:02d} {dot}{proj}"
         when = time.strftime("%a %b %d %H:%M", time.localtime(mtime))
@@ -307,7 +412,7 @@ def main():
 #  ══════════════════════════════════════════════════
 cd '{cwd}' && exec claude --dangerously-skip-permissions --resume {sid}
 """
-        app = OUT / folder / f"{base}.app"
+        app = OUT / "2 Projects" / folder / f"{base}.app"
         res = app / "Contents" / "Resources"
         macos = app / "Contents" / "MacOS"
         res.mkdir(parents=True, exist_ok=True)
@@ -328,19 +433,71 @@ cd '{cwd}' && exec claude --dangerously-skip-permissions --resume {sid}
                 pass  # never let icon rendering break the launcher list
         wanted.add(rel)
 
+        # flat chronological view: symlink into "All Sessions"
+        gidx += 1
+        alink = OUT / "1 All Sessions" / f"{gidx:03d} {dot}{proj} — {snippet}.app"
+        if alink.is_symlink():
+            if alink.readlink() != app:
+                alink.unlink()
+                alink.symlink_to(app)
+        else:
+            alink.symlink_to(app)
+        wanted.add(str(alink.relative_to(OUT)))
+
+    # action launchers + custom folder icons
+    make_action(OUT / "4 ⚡ Resume Active.app", "Resume Active", "play",
+                (217, 119, 87), RESUME_ACTIVE_BODY, wanted, OUT)
+    make_action(OUT / "3 ➕ New Session.app", "New Session", "plus",
+                (120, 190, 120),
+                f"#!/bin/bash\ncd \"$HOME\" && exec claude --dangerously-skip-permissions\n",
+                wanted, OUT)
+    folder_keys = set()
+    for folder, stx in folder_stats.items():
+        fdir = OUT / "2 Projects" / folder
+        make_action(fdir / "00 ➕ New Session.app", "New Session", "plus",
+                    accent_for(folder),
+                    f"#!/bin/bash\ncd '{stx['cwd']}' && exec claude --dangerously-skip-permissions\n",
+                    wanted, OUT)
+        fkey = hashlib.md5(repr((ICON_VER, folder, stx["total"], stx["gen"], stx["wait"])).encode()).hexdigest()
+        hk = f"__folder__/{folder}"
+        folder_keys.add(hk)
+        if _icon_hashes.get(hk) != fkey:
+            try:
+                make_folder_icon(folder, stx["total"], stx["gen"], stx["wait"], fdir)
+                _icon_hashes[hk] = fkey
+            except Exception:
+                pass
+    tg = sum(s["gen"] for s in folder_stats.values())
+    tw = sum(s["wait"] for s in folder_stats.values())
+    for name, total, hkname in [("1 All Sessions", gidx, "__top__/all"),
+                                ("2 Projects", len(folder_stats), "__top__/projects")]:
+        fkey = hashlib.md5(repr((ICON_VER, name, total, tg, tw)).encode()).hexdigest()
+        folder_keys.add(hkname)
+        if _icon_hashes.get(hkname) != fkey:
+            try:
+                make_folder_icon(name, total, tg, tw, OUT / name, unit=("project" if name.endswith("Projects") else "session"))
+                _icon_hashes[hkname] = fkey
+            except Exception:
+                pass
+
     # drop launchers that no longer apply (renamed status, pruned sessions) —
     # done after writing so the folder is never empty if clicked mid-refresh
     for old in OUT.rglob("*.app"):
         if str(old.relative_to(OUT)) not in wanted:
-            shutil.rmtree(old)
+            if old.is_symlink():
+                old.unlink()
+            else:
+                shutil.rmtree(old)
     for old in OUT.glob("*.command"):
         old.unlink()
-    for sub in OUT.iterdir():  # prune emptied project folders
-        if sub.is_dir() and sub.suffix != ".app" and not any(sub.iterdir()):
-            sub.rmdir()
+    for sub in list(OUT.glob("*")) + list((OUT / "2 Projects").glob("*")):
+        if (sub.is_dir() and not sub.is_symlink() and sub.suffix != ".app"
+                and sub.name not in ("1 All Sessions", "2 Projects")
+                and not any(sub.glob("*.app"))):
+            shutil.rmtree(sub)
 
     for k in list(_icon_hashes):
-        if k not in wanted:
+        if k not in wanted and k not in folder_keys:
             del _icon_hashes[k]
     ICON_HASHES.write_text(json.dumps(_icon_hashes))
 
