@@ -1,0 +1,38 @@
+#!/bin/bash
+# claude-restore [N] — reopen the N most recent Claude Code sessions (default 5),
+# each in its own Terminal window, resumed with --dangerously-skip-permissions.
+# Skips tiny/automated sessions (heartbeats, watchdog loops) by size and root-cwd.
+
+N="${1:-5}"
+MIN_KB=30
+
+# newest session files first
+find ~/.claude/projects -name "*.jsonl" -print0 2>/dev/null \
+  | xargs -0 stat -f '%m %N' \
+  | sort -rn \
+  | cut -d' ' -f2- \
+  | while read -r f; do
+      # skip small files (automated jobs)
+      kb=$(( $(stat -f '%z' "$f") / 1024 ))
+      [ "$kb" -lt "$MIN_KB" ] && continue
+      # pull cwd + session id
+      cwd=$(head -20 "$f" | /usr/bin/python3 -c '
+import sys, json
+for line in sys.stdin:
+    try: d = json.loads(line)
+    except: continue
+    if d.get("cwd"): print(d["cwd"]); break
+' 2>/dev/null)
+      [ -z "$cwd" ] || [ "$cwd" = "/" ] || [ ! -d "$cwd" ] && continue
+      sid=$(basename "$f" .jsonl)
+      echo "$sid|$cwd"
+    done \
+  | awk -F'|' '!seen[$2]++' \
+  | head -n "$N" \
+  | while IFS='|' read -r sid cwd; do
+      echo "Opening: $cwd  (session $sid)"
+      osascript -e "tell application \"Terminal\"
+        activate
+        do script \"cd '$cwd' && claude --dangerously-skip-permissions --resume $sid\"
+      end tell" >/dev/null
+    done
