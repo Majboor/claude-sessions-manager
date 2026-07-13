@@ -30,7 +30,13 @@ workflow (and more) to Claude Code in the terminal:
 - 🖥 **Live terminal-preview icons** — each launcher's icon *is* a mini terminal window
   showing your last prompt and Claude's latest output, re-rendered as conversations progress
 - ⚡ **Live status badges** — orange = generating right now, green = waiting for your input
-- 📁 **Project folders** — sessions auto-categorized by configurable rules
+- 📁 **Project folders** — sessions auto-categorized by configurable rules into a
+  two-level layout (**All Sessions** + **Projects**), each folder wearing a custom
+  icon with its session count and live-status badges
+- 🎬 **In-grid actions** — **➕ New Session** launchers (global and per-project),
+  **⚡ Resume Active** to reopen every running session that lost its window, and
+  **✏️ Edit Sessions** to re-tag a session into another (or a brand-new) project
+  through native macOS dialogs
 - 🔍 **Hover previews** — a companion viewer app enlarges any session into a readable
   transcript on mouse-over
 - ♻️ **Reboot respawn** — sessions that were running at shutdown reopen automatically
@@ -45,6 +51,10 @@ workflow (and more) to Claude Code in the terminal:
 Status badges update every minute:
 
 <img src="assets/status-cycle.gif" width="200" alt="status cycling from generating to waiting to idle">
+
+Project folders wear their own icons — name, session count, and live-status badges:
+
+<img src="assets/folder-icons.png" width="560" alt="custom project folder icons">
 
 ## Install
 
@@ -72,10 +82,14 @@ bin/claude-sessions-refresh
         │  · categorizes into project folders (rules in ~/.claude/session-projects.json)
         │  · records running sessions for respawn-after-reboot
         ▼
-~/ClaudeSessions/<Project>/<NN status name>.app     (tiny launcher bundles)
-        │                                            click → Terminal → claude --resume
-        ├── Dock stack (grid view)  ← browse & launch
-        └── viewer app              ← hover-to-enlarge previews
+~/ClaudeSessions/
+├── 1 All Sessions/            flat chronological view (symlinks)
+├── 2 Projects/<Project>/      categorized view + per-project actions
+│      ├── 00 ➕ New Session    fresh claude in that project's directory
+│      ├── 00 ✏️ Edit Sessions  re-tag sessions via native dialogs
+│      └── NN <session>.app    click → Terminal → claude --resume
+├── 3 ➕ New Session            fresh claude in $HOME
+└── 4 ⚡ Resume Active          reopen every live session missing a window
 ```
 
 **Your transcripts are never modified.** The launchers are generated pointers;

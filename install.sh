@@ -14,8 +14,8 @@ echo "==> checking dependencies"
 
 echo "==> installing scripts to ~/bin"
 mkdir -p "$HOME/bin"
-cp "$REPO/bin/claude-sessions-refresh" "$REPO/bin/claude-restore" "$REPO/bin/claude-respawn" "$HOME/bin/"
-chmod +x "$HOME/bin/claude-sessions-refresh" "$HOME/bin/claude-restore" "$HOME/bin/claude-respawn"
+cp "$REPO/bin/claude-sessions-refresh" "$REPO/bin/claude-restore" "$REPO/bin/claude-respawn" "$REPO/bin/claude-session-edit" "$HOME/bin/"
+chmod +x "$HOME/bin/claude-sessions-refresh" "$HOME/bin/claude-restore" "$HOME/bin/claude-respawn" "$HOME/bin/claude-session-edit"
 
 echo "==> building viewer app"
 APP="$HOME/Applications/Claude Sessions.app"

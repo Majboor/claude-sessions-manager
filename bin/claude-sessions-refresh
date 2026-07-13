@@ -310,6 +310,10 @@ def make_glyph_icon(kind, accent, dest):
     if kind == "plus":
         d.rounded_rectangle([c - r, c - t, c + r, c + t], radius=t, fill=accent)
         d.rounded_rectangle([c - t, c - r, c + t, c + r], radius=t, fill=accent)
+    elif kind == "edit":  # pencil: diagonal shaft + tip
+        d.line([(c - 90, c + 90), (c + 70, c - 70)], fill=accent, width=52)
+        d.polygon([(c - 130, c + 130), (c - 96, c + 62), (c - 62, c + 96)], fill=accent)
+        d.line([(c + 46, c - 94), (c + 94, c - 46)], fill=accent, width=52)
     else:  # play triangle
         d.polygon([(c - 80, c - 110), (c - 80, c + 110), (c + 120, c)], fill=accent)
     img.save(ICON_TMP)
@@ -457,6 +461,10 @@ cd '{cwd}' && exec claude --dangerously-skip-permissions --resume {sid}
         make_action(fdir / "00 ➕ New Session.app", "New Session", "plus",
                     accent_for(folder),
                     f"#!/bin/bash\ncd '{stx['cwd']}' && exec claude --dangerously-skip-permissions\n",
+                    wanted, OUT)
+        make_action(fdir / "00 ✏️ Edit Sessions.app", "Edit Sessions", "edit",
+                    (222, 184, 78),
+                    f"#!/bin/bash\nexec \"$HOME/bin/claude-session-edit\" '{folder}'\n",
                     wanted, OUT)
         fkey = hashlib.md5(repr((ICON_VER, folder, stx["total"], stx["gen"], stx["wait"])).encode()).hexdigest()
         hk = f"__folder__/{folder}"

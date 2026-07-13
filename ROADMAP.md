@@ -29,3 +29,5 @@
 - ✅ Hover-to-enlarge viewer app
 - ✅ Rule-based project categorization
 - ✅ Respawn running sessions after reboot
+- ✅ Two-level layout (All Sessions + Projects) with custom folder icons
+- ✅ In-grid actions: New Session, Resume Active, Edit Sessions (re-tagging)

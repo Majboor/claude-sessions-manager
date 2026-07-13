@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Interactive re-tagger: move a session out of a project folder.
+
+Invoked by the "✏️ Edit Sessions" launcher inside each project folder.
+Shows native dialogs; writes pins into ~/.claude/session-projects.json and
+re-runs the refresh daemon. Session transcripts are never touched.
+"""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECTS_DIR = Path.home() / "ClaudeSessions" / "2 Projects"
+MAP = Path.home() / ".claude" / "session-projects.json"
+
+
+def osa(script):
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def ask_list(prompt, items):
+    lst = ", ".join('"' + i.replace('\\', '').replace('"', "'") + '"' for i in items)
+    out = osa(f'choose from list {{{lst}}} with prompt "{prompt}" with title "Claude Sessions"')
+    return None if out in ("false", "") else out
+
+
+def ask_text(prompt):
+    out = osa(f'text returned of (display dialog "{prompt}" default answer "" with title "Claude Sessions")')
+    return out or None
+
+
+def main():
+    folder = sys.argv[1]
+    pdir = PROJECTS_DIR / folder
+    sessions = {}
+    for app in sorted(pdir.glob("*.app")):
+        cmd = app / "Contents" / "Resources" / "session.command"
+        if not cmd.exists():
+            continue
+        text = cmd.read_text()
+        m = re.search(r"--resume ([0-9a-f-]{36})", text)
+        if not m:
+            continue  # action launchers have no resume line
+        c = re.search(r"\ncd '([^']+)'", text)
+        label = app.stem.replace('"', "'")
+        sessions[label] = (m.group(1), c.group(1) if c else "")
+
+    if not sessions:
+        osa('display notification "No sessions in this project" with title "Claude Sessions"')
+        return
+    choice = ask_list(f"[{folder}]  Pick a session to move:", list(sessions))
+    if not choice:
+        return
+    sid, cwd = sessions[choice]
+
+    others = sorted(p.name for p in PROJECTS_DIR.iterdir()
+                    if p.is_dir() and p.suffix != ".app" and p.name != folder)
+    NEW, AUTO = "+ New project...", "- Remove from project (re-file by folder name)"
+    target = ask_list("Move it to:", others + [NEW, AUTO])
+    if not target:
+        return
+    if target == NEW:
+        target = ask_text("New project name:")
+        if not target:
+            return
+    elif target == AUTO:
+        target = Path(cwd).name if cwd else "Other"
+
+    try:
+        mp = json.loads(MAP.read_text())
+    except Exception:
+        mp = {"sids": {}, "rules": []}
+    mp.setdefault("sids", {})[sid] = target
+    MAP.write_text(json.dumps(mp, indent=2))
+
+    subprocess.run([str(Path.home() / "bin" / "claude-sessions-refresh")],
+                   capture_output=True)
+    osa(f'display notification "Moved to {target}" with title "Claude Sessions"')
+
+
+if __name__ == "__main__":
+    main()
