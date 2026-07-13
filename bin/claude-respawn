@@ -1,0 +1,19 @@
+#!/bin/bash
+# claude-respawn — at login, reopen the Claude sessions that were running
+# before shutdown (recorded in ~/.claude/active-sessions-state.txt by
+# claude-sessions-refresh every minute while the machine is up).
+
+STATE="$HOME/.claude/active-sessions-state.txt"
+[ -s "$STATE" ] || exit 0
+
+# don't respawn on plain re-login: only within 10 min of boot
+boot=$(sysctl -n kern.boottime | sed 's/.*sec = \([0-9]*\).*/\1/')
+(( $(date +%s) - boot > 600 )) && exit 0
+
+while IFS='|' read -r sid cwd; do
+  [ -d "$cwd" ] || continue
+  osascript -e "tell application \"Terminal\"
+    activate
+    do script \"cd '$cwd' && claude --dangerously-skip-permissions --resume $sid\"
+  end tell" >/dev/null
+done < "$STATE"
