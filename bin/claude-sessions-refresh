@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Regenerate ~/ClaudeSessions with .app launchers for recent Claude sessions.
+
+Each launcher is a tiny app bundle whose icon is a rendered mini terminal
+window showing the session's last messages — so the Dock grid displays real
+previews. Clicking one opens Terminal and resumes the session.
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+PROJECTS = Path.home() / ".claude" / "projects"
+OUT = Path.home() / "ClaudeSessions"
+MAX_SESSIONS = 100
+MIN_BYTES = 4 * 1024  # skip near-empty session stubs
+STATE = Path.home() / ".claude" / "active-sessions-state.txt"
+GENERATING_SECS = 90  # jsonl written this recently while running => generating
+ICON_TMP = Path.home() / ".claude" / "session-icon-tmp.png"
+ICON_HASHES = Path.home() / ".claude" / "session-icon-hashes.json"
+PROJECT_MAP = Path.home() / ".claude" / "session-projects.json"
+
+try:
+    _proj_map = json.loads(PROJECT_MAP.read_text())
+except Exception:
+    _proj_map = {"sids": {}, "rules": []}
+
+
+def categorize(sid, cwd, first):
+    """Project folder for a session: pinned sid > rules > cwd basename."""
+    pinned = _proj_map.get("sids", {}).get(sid)
+    if pinned:
+        return pinned
+    hay = f"{cwd} | {first[:200]}"
+    for pat, name in _proj_map.get("rules", []):
+        try:
+            if re.search(pat, hay, re.I):
+                return name
+        except re.error:
+            continue
+    return os.path.basename(cwd) or "Other"
+
+_FONT = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 46)
+_FONT_BOLD = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 22, index=1)
+_FONT_SM = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 26)
+_FONT_SM_BOLD = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 28, index=1)
+ICON_VER = "v5"  # bump to force re-render of all icons
+
+INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleExecutable</key><string>run</string>
+	<key>CFBundleIconFile</key><string>icon</string>
+	<key>CFBundleIdentifier</key><string>com.hico.claude-session</string>
+	<key>CFBundleName</key><string>{name}</string>
+	<key>LSUIElement</key><true/>
+</dict>
+</plist>
+"""
+
+RUN_SCRIPT = """#!/bin/bash
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec open -a Terminal "$DIR/Resources/session.command"
+"""
+
+try:
+    _icon_hashes = json.loads(ICON_HASHES.read_text())
+except Exception:
+    _icon_hashes = {}
+
+
+def text_of(msg):
+    c = msg.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def head_info(path):
+    """Return (cwd, first_user_message) from the start of a session file."""
+    cwd, first = None, None
+    with open(path, "r", errors="replace") as f:
+        for _ in range(30):
+            line = f.readline()
+            if not line:
+                break
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            cwd = cwd or d.get("cwd")
+            if first is None and d.get("type") == "user":
+                t = text_of(d.get("message", {})).strip()
+                if t:
+                    first = t
+            if cwd and first:
+                break
+    return cwd, first
+
+
+def tail_messages(path, n=12):
+    """Last n user/assistant text messages, for the icon and QL preview."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        f.seek(max(0, size - 300_000))
+        chunk = f.read().decode("utf-8", errors="replace")
+    msgs = []
+    for line in chunk.splitlines():
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") not in ("user", "assistant"):
+            continue
+        t = re.sub(r"\[Image[^\]]*\]", "", text_of(d.get("message", {})))
+        t = re.sub(r"\s+", " ", t).strip()
+        if not t or t.startswith("<"):  # skip tool results / system reminders
+            continue
+        who = "you" if d.get("type") == "user" else "claude"
+        msgs.append((who, t[:400]))
+    return msgs[-n:]
+
+
+def running_claude():
+    """Return (set of resumed session ids, set of cwds) of live claude processes."""
+    sids, cwds = set(), set()
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    except Exception:
+        return sids, cwds
+    for line in ps.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        if not re.search(r"(^|/)claude( |$)", cmd.split(" -")[0]) and " claude " not in f" {cmd} ":
+            continue
+        if "claude-sessions-refresh" in cmd:
+            continue
+        m = re.search(r"--resume\s+([0-9a-f-]{36})", cmd)
+        if m:
+            sids.add(m.group(1))
+        try:
+            out = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            for l in out.splitlines():
+                if l.startswith("n"):
+                    cwds.add(l[1:])
+        except Exception:
+            pass
+    return sids, cwds
+
+
+def make_terminal_icon(proj, msgs, dot, dest):
+    """Render a mini terminal window with the session's last messages -> icns."""
+    S = 512
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([2, 2, S - 2, S - 2], radius=42, fill=(24, 26, 31, 255),
+                        outline=(70, 74, 82, 255), width=2)
+    d.rounded_rectangle([2, 2, S - 2, 52], radius=42, fill=(38, 41, 48, 255))
+    d.rectangle([2, 30, S - 2, 52], fill=(38, 41, 48, 255))
+    for i, c in enumerate([(255, 95, 87), (254, 188, 46), (40, 200, 64)]):
+        d.ellipse([24 + i * 32, 16, 46 + i * 32, 38], fill=c)
+    title = proj[:24]
+    d.text((140, 16), title, font=_FONT_BOLD, fill=(170, 175, 185))
+    if dot:
+        col = (217, 119, 87) if dot.startswith("⚡") else (40, 200, 64)
+        d.ellipse([S - 48, 14, S - 22, 40], fill=col)
+    # zoomed view: your last prompt (2 lines) + claude's latest output (rest)
+    last_you = next((t for w, t in reversed(msgs) if w == "you"), "")
+    last_claude = next((t for w, t in reversed(msgs) if w == "claude"), "")
+    y = 66
+    W = 16  # chars per line at this font size
+    for who, text, maxlines in [("you", last_you, 2), ("claude", last_claude, 6)]:
+        text = re.sub(r"[^\x20-\x7e]", "", text).strip()
+        if not text:
+            continue
+        pcol = (217, 119, 87) if who == "you" else (150, 200, 150)
+        tcol = (240, 240, 237) if who == "you" else (185, 191, 201)
+        for j, chunk in enumerate([text[k:k + W] for k in range(0, len(text), W)][:maxlines]):
+            if y > S - 56:
+                break
+            if j == 0:
+                d.text((14, y), ">" if who == "you" else "*", font=_FONT, fill=pcol)
+            d.text((48, y), chunk, font=_FONT, fill=tcol)
+            y += 54
+        y += 8
+    img.save(ICON_TMP)
+    subprocess.run(["sips", "-s", "format", "icns", str(ICON_TMP), "--out", str(dest)],
+                   capture_output=True)
+
+
+def make_detail_preview(proj, msgs, dot, dest):
+    """Large hover preview: the full recent conversation in readable type."""
+    S = 1024
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([2, 2, S - 2, S - 2], radius=36, fill=(24, 26, 31, 250),
+                        outline=(80, 84, 92, 255), width=2)
+    d.rounded_rectangle([2, 2, S - 2, 78], radius=36, fill=(38, 41, 48, 255))
+    d.rectangle([2, 44, S - 2, 78], fill=(38, 41, 48, 255))
+    for i, c in enumerate([(255, 95, 87), (254, 188, 46), (40, 200, 64)]):
+        d.ellipse([36 + i * 46, 24, 68 + i * 46, 56], fill=c)
+    tw = d.textlength(proj[:40], font=_FONT_SM_BOLD)
+    d.text(((S - tw) / 2, 26), proj[:40], font=_FONT_SM_BOLD, fill=(180, 185, 195))
+    if dot:
+        col = (217, 119, 87) if dot.startswith("⚡") else (40, 200, 64)
+        d.ellipse([S - 70, 24, S - 38, 56], fill=col)
+    y = 104
+    W = 58  # chars per line
+    LH = 34
+    for who, text in msgs:
+        text = re.sub(r"[^\x20-\x7e]", "", text).strip()
+        if not text:
+            continue
+        pcol = (217, 119, 87) if who == "you" else (150, 200, 150)
+        tcol = (240, 240, 237) if who == "you" else (185, 191, 201)
+        for j, chunk in enumerate([text[k:k + W].lstrip() for k in range(0, len(text), W)][:4]):
+            if y > S - LH - 24:
+                break
+            if j == 0:
+                d.text((28, y), ">" if who == "you" else "*", font=_FONT_SM, fill=pcol)
+            d.text((64, y), chunk, font=_FONT_SM, fill=tcol)
+            y += LH
+        y += 14
+        if y > S - LH - 24:
+            break
+    img.save(dest)
+
+
+def write_if_changed(path, content, mode=None):
+    if not path.exists() or path.read_text() != content:
+        path.write_text(content)
+    if mode:
+        path.chmod(mode)
+
+
+def main():
+    sessions = []
+    for f in PROJECTS.glob("*/*.jsonl"):
+        st = f.stat()
+        if st.st_size < MIN_BYTES:
+            continue
+        sessions.append((st.st_mtime, f))
+    sessions.sort(reverse=True)
+
+    picked = []
+    for mtime, f in sessions:
+        if len(picked) >= MAX_SESSIONS:
+            break
+        cwd, first = head_info(f)
+        if not cwd or cwd == "/" or not os.path.isdir(cwd):
+            continue
+        if first and re.match(r"(You are (an?|the) |Reply with )", first):
+            continue  # automated job prompt, not interactive work
+        picked.append((mtime, f, cwd, first or ""))
+
+    OUT.mkdir(exist_ok=True)
+    live_sids, live_cwds = running_claude()
+    seen_live_cwd = set()
+    now = time.time()
+    active_state = []
+    wanted = set()
+
+    counters = {}
+    for mtime, f, cwd, first in picked:
+        sid = f.stem
+        proj = os.path.basename(cwd)
+        folder = re.sub(r"[/:]", "-", categorize(sid, cwd, first))
+        counters[folder] = counters.get(folder, 0) + 1
+        i = counters[folder]
+        # active = a claude process is resumed on this session, or one is
+        # running in this folder and this is the folder's newest session
+        active = sid in live_sids or (cwd in live_cwds and cwd not in seen_live_cwd)
+        if cwd in live_cwds:
+            seen_live_cwd.add(cwd)
+        if active:
+            active_state.append(f"{sid}|{cwd}")
+            dot = "⚡ " if now - mtime < GENERATING_SECS else "🟢 "
+        else:
+            dot = ""
+        snippet = re.sub(r"[/:\n\r]", " ", first)[:45].strip()
+        base = f"{i:02d} {dot}{proj} — {snippet}" if snippet else f"{i:02d} {dot}{proj}"
+        when = time.strftime("%a %b %d %H:%M", time.localtime(mtime))
+        msgs = tail_messages(f)
+        preview = "\n".join(f"#  [{who}] {t}" for who, t in msgs)
+        body = f"""#!/bin/bash
+#  ══════════════════════════════════════════════════
+#  Claude session — {proj}{"  ·  " + ("⚡ GENERATING" if dot == "⚡ " else "🟢 RUNNING, waiting for you") if active else ""}
+#  Folder:      {cwd}
+#  Last active: {when}
+#  Session id:  {sid}
+#  ══════════════════════════════════════════════════
+#
+#  Recent conversation:
+#
+{preview}
+#
+#  ══════════════════════════════════════════════════
+cd '{cwd}' && exec claude --dangerously-skip-permissions --resume {sid}
+"""
+        app = OUT / folder / f"{base}.app"
+        res = app / "Contents" / "Resources"
+        macos = app / "Contents" / "MacOS"
+        res.mkdir(parents=True, exist_ok=True)
+        macos.mkdir(parents=True, exist_ok=True)
+        write_if_changed(app / "Contents" / "Info.plist", INFO_PLIST.format(name=proj))
+        write_if_changed(macos / "run", RUN_SCRIPT, mode=0o755)
+        write_if_changed(res / "session.command", body, mode=0o755)
+
+        rel = str(app.relative_to(OUT))
+        key = hashlib.md5(repr((ICON_VER, proj, msgs, dot)).encode()).hexdigest()
+        if _icon_hashes.get(rel) != key or not (res / "icon.icns").exists():
+            try:
+                make_terminal_icon(proj, msgs, dot, res / "icon.icns")
+                make_detail_preview(proj, msgs, dot, res / "preview.png")
+                app.touch()  # nudge Finder/Dock icon cache
+                _icon_hashes[rel] = key
+            except Exception:
+                pass  # never let icon rendering break the launcher list
+        wanted.add(rel)
+
+    # drop launchers that no longer apply (renamed status, pruned sessions) —
+    # done after writing so the folder is never empty if clicked mid-refresh
+    for old in OUT.rglob("*.app"):
+        if str(old.relative_to(OUT)) not in wanted:
+            shutil.rmtree(old)
+    for old in OUT.glob("*.command"):
+        old.unlink()
+    for sub in OUT.iterdir():  # prune emptied project folders
+        if sub.is_dir() and sub.suffix != ".app" and not any(sub.iterdir()):
+            sub.rmdir()
+
+    for k in list(_icon_hashes):
+        if k not in wanted:
+            del _icon_hashes[k]
+    ICON_HASHES.write_text(json.dumps(_icon_hashes))
+
+    # record what's running so claude-respawn can restore it after a reboot
+    STATE.write_text("\n".join(active_state) + ("\n" if active_state else ""))
+
+    print(f"wrote {len(picked)} launchers to {OUT}, {len(active_state)} active")
+
+
+if __name__ == "__main__":
+    main()
