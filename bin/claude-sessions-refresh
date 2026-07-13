@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Users/hico/.pyenv/versions/3.11.9/bin/python3
 """Regenerate ~/ClaudeSessions with .app launchers for recent Claude sessions.
 
 Each launcher is a tiny app bundle whose icon is a rendered mini terminal
@@ -76,11 +76,16 @@ RESUME_ACTIVE_BODY = """#!/bin/bash
 # Reopen every session recorded as active (written each minute by the refresh daemon).
 STATE="$HOME/.claude/active-sessions-state.txt"
 [ -s "$STATE" ] || { echo "no active sessions recorded"; sleep 2; exit 0; }
-while IFS='|' read -r sid cwd; do
+while IFS='|' read -r sid cwd bounds; do
   [ -d "$cwd" ] || continue
   pgrep -f "claude .*--resume $sid" >/dev/null && continue  # already open
   osascript -e "tell application \\"Terminal\\" to do script \\"cd '$cwd' && claude --dangerously-skip-permissions --resume $sid\\"" >/dev/null
+  [ -n "$bounds" ] && osascript -e "tell application \\"Terminal\\" to set bounds of front window to {$bounds}" >/dev/null
 done < "$STATE"
+"""
+
+RESTORE_HANDOVER_BODY = """#!/bin/bash
+exec "$HOME/bin/claude-restore-handover"
 """
 
 try:
@@ -144,30 +149,63 @@ def tail_messages(path, n=12):
 
 
 def running_claude():
-    """Return (set of resumed session ids, set of cwds) of live claude processes."""
-    sids, cwds = set(), set()
+    """Return ({sid: tty}, {cwd: tty}) of live claude processes."""
+    sids, cwds = {}, {}
     try:
-        ps = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+        ps = subprocess.run(["ps", "-axo", "pid=,tty=,command="], capture_output=True, text=True).stdout
     except Exception:
         return sids, cwds
     for line in ps.splitlines():
-        pid, _, cmd = line.strip().partition(" ")
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, tty, cmd = parts
         if not re.search(r"(^|/)claude( |$)", cmd.split(" -")[0]) and " claude " not in f" {cmd} ":
             continue
         if "claude-sessions-refresh" in cmd:
             continue
+        tty = "" if tty in ("??", "-") else tty
         m = re.search(r"--resume\s+([0-9a-f-]{36})", cmd)
         if m:
-            sids.add(m.group(1))
+            sids[m.group(1)] = tty
         try:
             out = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
                                  capture_output=True, text=True, timeout=5).stdout
             for l in out.splitlines():
                 if l.startswith("n"):
-                    cwds.add(l[1:])
+                    cwds[l[1:]] = tty
         except Exception:
             pass
     return sids, cwds
+
+
+def terminal_bounds():
+    """Map tty ('ttys004') -> Terminal window bounds 'x1,y1,x2,y2'."""
+    script = '''set out to ""
+tell application "Terminal"
+	repeat with w in windows
+		try
+			set b to bounds of w
+			set bs to ((item 1 of b) as text) & "," & ((item 2 of b) as text) & "," & ((item 3 of b) as text) & "," & ((item 4 of b) as text)
+			repeat with t in tabs of w
+				set out to out & (tty of t) & "|" & bs & linefeed
+			end repeat
+		end try
+	end repeat
+end tell
+return out'''
+    m = {}
+    try:
+        out = subprocess.run(["osascript", "-e", script],
+                             capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            tty, _, bounds = line.partition("|")
+            tty = tty.strip().removeprefix("/dev/")
+            if tty and bounds.strip():
+                m[tty] = bounds.strip()
+    except Exception:
+        pass
+    return m
 
 
 def make_terminal_icon(proj, msgs, dot, dest):
@@ -310,6 +348,9 @@ def make_glyph_icon(kind, accent, dest):
     if kind == "plus":
         d.rounded_rectangle([c - r, c - t, c + r, c + t], radius=t, fill=accent)
         d.rounded_rectangle([c - t, c - r, c + t, c + r], radius=t, fill=accent)
+    elif kind == "restore":  # lifebuoy ring
+        d.ellipse([c - r - 20, c - r - 20, c + r + 20, c + r + 20],
+                  outline=accent, width=64)
     elif kind == "edit":  # pencil: diagonal shaft + tip
         d.line([(c - 90, c + 90), (c + 70, c - 70)], fill=accent, width=52)
         d.polygon([(c - 130, c + 130), (c - 96, c + 62), (c - 62, c + 96)], fill=accent)
@@ -364,6 +405,7 @@ def main():
 
     OUT.mkdir(exist_ok=True)
     live_sids, live_cwds = running_claude()
+    ttymap = terminal_bounds() if (live_sids or live_cwds) else {}
     seen_live_cwd = set()
     now = time.time()
     active_state = []
@@ -386,7 +428,8 @@ def main():
         if cwd in live_cwds:
             seen_live_cwd.add(cwd)
         if active:
-            active_state.append(f"{sid}|{cwd}")
+            tty = live_sids.get(sid) or live_cwds.get(cwd) or ""
+            active_state.append(f"{sid}|{cwd}|{ttymap.get(tty, '')}")
             dot = "⚡ " if now - mtime < GENERATING_SECS else "🟢 "
         else:
             dot = ""
@@ -449,6 +492,8 @@ cd '{cwd}' && exec claude --dangerously-skip-permissions --resume {sid}
         wanted.add(str(alink.relative_to(OUT)))
 
     # action launchers + custom folder icons
+    make_action(OUT / "0 🛟 Restore All.app", "Restore All", "restore",
+                (95, 158, 217), RESTORE_HANDOVER_BODY, wanted, OUT)
     make_action(OUT / "4 ⚡ Resume Active.app", "Resume Active", "play",
                 (217, 119, 87), RESUME_ACTIVE_BODY, wanted, OUT)
     make_action(OUT / "3 ➕ New Session.app", "New Session", "plus",

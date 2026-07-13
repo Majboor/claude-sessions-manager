@@ -1,0 +1,42 @@
+#!/bin/bash
+# claude-restore-handover — crash recovery via Claude. Opens ONE Claude window
+# (this one) with a handover prompt; Claude then reopens every session recorded
+# in ~/.claude/active-sessions-state.txt in its own Terminal window, in the
+# right folder, restored to the saved window layout.
+# Clicked as "0 🛟 Restore All" in the ClaudeSessions grid.
+
+STATE="$HOME/.claude/active-sessions-state.txt"
+if [ ! -s "$STATE" ]; then
+  echo "No active sessions recorded in $STATE — nothing to restore."
+  echo "(The refresh daemon records running sessions there every minute.)"
+  sleep 4
+  exit 0
+fi
+
+read -r -d '' PROMPT <<'EOF'
+You are doing crash recovery on this Mac: Claude Code sessions were running in
+Terminal windows and got closed. The file ~/.claude/active-sessions-state.txt
+records what was running (written every minute by a refresh daemon), one
+session per line, in the format:
+
+  session_id|working_directory|x1,y1,x2,y2
+
+The last field is the Terminal window bounds for layout; it may be empty.
+
+Restore every session:
+1. Read the state file.
+2. For each line, skip it if a claude process with "--resume <session_id>" is
+   already running (check once with: ps ax -o command | grep -- --resume).
+3. Otherwise open a NEW Terminal window via osascript running:
+   cd '<working_directory>' && claude --dangerously-skip-permissions --resume <session_id> 'continue where you left off'
+   and, if bounds are present, immediately set that window's layout in the same
+   osascript: set bounds of front window to {x1, y1, x2, y2}.
+   Do the sessions one at a time so "front window" is always the one just opened.
+4. Never close or reuse this window — it is yours. Skip your own session.
+5. When done, verify with ps that every session from the file is running, then
+   report a short summary: what was restored, what was already running, and
+   anything that failed.
+EOF
+
+cd "$HOME"
+exec claude --dangerously-skip-permissions "$PROMPT"

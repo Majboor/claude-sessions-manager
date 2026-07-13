@@ -10,10 +10,11 @@ STATE="$HOME/.claude/active-sessions-state.txt"
 boot=$(sysctl -n kern.boottime | sed 's/.*sec = \([0-9]*\).*/\1/')
 (( $(date +%s) - boot > 600 )) && exit 0
 
-while IFS='|' read -r sid cwd; do
+while IFS='|' read -r sid cwd bounds; do
   [ -d "$cwd" ] || continue
   osascript -e "tell application \"Terminal\"
     activate
     do script \"cd '$cwd' && claude --dangerously-skip-permissions --resume $sid\"
   end tell" >/dev/null
+  [ -n "$bounds" ] && osascript -e "tell application \"Terminal\" to set bounds of front window to {$bounds}" >/dev/null
 done < "$STATE"

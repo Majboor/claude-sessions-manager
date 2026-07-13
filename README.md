@@ -37,6 +37,9 @@ workflow (and more) to Claude Code in the terminal:
   **⚡ Resume Active** to reopen every running session that lost its window, and
   **✏️ Edit Sessions** to re-tag a session into another (or a brand-new) project
   through native macOS dialogs
+- 🛟 **Restore All** — after a crash, one click opens a single Claude window with a
+  handover prompt; Claude itself reopens every recorded session in the right folder
+  and puts each window back at its saved position
 - 🔍 **Hover previews** — a companion viewer app enlarges any session into a readable
   transcript on mouse-over
 - ♻️ **Reboot respawn** — sessions that were running at shutdown reopen automatically
@@ -88,6 +91,7 @@ bin/claude-sessions-refresh
 │      ├── 00 ➕ New Session    fresh claude in that project's directory
 │      ├── 00 ✏️ Edit Sessions  re-tag sessions via native dialogs
 │      └── NN <session>.app    click → Terminal → claude --resume
+├── 0 🛟 Restore All            Claude-driven crash recovery with saved window layout
 ├── 3 ➕ New Session            fresh claude in $HOME
 └── 4 ⚡ Resume Active          reopen every live session missing a window
 ```
@@ -101,7 +105,8 @@ everything under `~/.claude/projects` is opened read-only.
 |---|---|
 | `bin/claude-sessions-refresh` | The daemon: scans, filters, renders icons, categorizes, tracks live sessions |
 | `bin/claude-restore [N]` | One command to reopen your N most recent sessions in Terminal windows |
-| `bin/claude-respawn` | Runs at login; reopens the sessions that were live at shutdown (within 10 min of boot) |
+| `bin/claude-respawn` | Runs at login; reopens the sessions that were live at shutdown (within 10 min of boot), restoring window positions |
+| `bin/claude-restore-handover` | Crash recovery: opens one Claude window with a handover prompt; Claude reopens every recorded session with the saved layout |
 | `viewer/viewer.py` | PyObjC app: session grid with hover-to-enlarge transcript previews |
 | `launchd/*.template` | Agent definitions installed by `install.sh` |
 
