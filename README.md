@@ -55,6 +55,11 @@ Status badges update every minute:
 
 <img src="assets/status-cycle.gif" width="200" alt="status cycling from generating to waiting to idle">
 
+Crashed? One click on **🛟 Restore All** hands recovery to Claude — it reopens every
+recorded session in its folder and restores the saved window layout:
+
+<img src="assets/restore-all.gif" width="640" alt="Restore All: after a crash, one click opens a Claude handover that reopens every session with the saved layout">
+
 Project folders wear their own icons — name, session count, and live-status badges:
 
 <img src="assets/folder-icons.png" width="560" alt="custom project folder icons">
